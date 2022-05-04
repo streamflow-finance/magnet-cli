@@ -11,11 +11,13 @@ use itertools::Itertools;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use retry::{delay::Fixed, OperationResult};
 use serde::{Deserialize, Serialize};
-use solana_client::rpc_client::RpcClient;
+use solana_client::{
+    rpc_client::RpcClient, rpc_response::RpcConfirmedTransactionStatusWithSignature,
+};
 use solana_program::pubkey::Pubkey;
 
 use anyhow::{Context, Result};
-use solana_sdk::account::Account;
+use solana_sdk::{account::Account, signature::Signature};
 use solana_transaction_status::{
     parse_accounts::ParsedAccount, parse_instruction::ParsedInstruction,
     EncodedConfirmedTransactionWithStatusMeta, UiInnerInstructions,
@@ -68,6 +70,16 @@ enum Commands {
         #[clap(short, long, default_value_t = 50)]
         tx_cnt: usize,
     },
+
+    PickTop {
+        
+        /// Sets an input file to parse and analyze
+        #[clap(short, long, parse(from_os_str))]
+        input: PathBuf,
+
+        #[clap(short, long, default_value_t = 5)]
+        n: usize,
+    }
 }
 
 fn main() -> Result<()> {
@@ -99,10 +111,124 @@ fn main() -> Result<()> {
             tx_cnt,
         }) => {
             analyze(rpc_client, input, output, referent_addr, tx_cnt)?;
+        },
+        Some(Commands::PickTop { input, n }) => {
+            pick_top(input, n)?;
         }
         None => {
             panic!("Command must be specified");
         }
+    }
+
+    Ok(())
+}
+
+fn pick_top(input: PathBuf, n: usize) -> Result<()> {
+
+    let input: Result<Vec<ProgramCMP>, _> = std::fs::read_to_string(input)?.lines().map(|l| serde_json::from_str(l)).collect();
+    let mut input = input?;
+
+    let mut pids = HashMap::new();
+
+    log::info!("==== 1. addrs by program size factor");
+    input.sort_by(|a, b| {
+        let mut a_s = a.program_instruction_size_factor;
+        let mut b_s = b.program_instruction_size_factor;
+        if a_s > 1.0 {
+            a_s = 1.0 / a_s;
+        }
+
+        if b_s > 1.0 {
+            b_s = 1.0 / b_s;
+        }
+
+        b_s.partial_cmp(&a_s).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {}", p.program_addr, p.program_instruction_size_factor);
+    });
+
+    log::info!("==== 2. addrs by program owned accounts size factor");
+    input.sort_by(|a, b| {
+        let mut a_s = a.program_owned_accounts_avg_size_factor;
+        let mut b_s = b.program_owned_accounts_avg_size_factor;
+        if a_s > 1.0 {
+            a_s = 1.0 / a_s;
+        }
+
+        if b_s > 1.0 {
+            b_s = 1.0 / b_s;
+        }
+
+        b_s.partial_cmp(&a_s).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {}", p.program_addr, p.program_owned_accounts_avg_size_factor);
+    });
+
+    log::info!("==== 3. addrs by shape hits");
+    input.sort_by(|a, b| {
+        let a_s = a.shape_hits;
+        let b_s = b.shape_hits;
+        b_s.partial_cmp(&a_s).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {}", p.program_addr, p.shape_hits);
+    });
+
+    log::info!("==== 4. addrs by mean levenshtien");
+    input.sort_by(|a, b| {
+        let a_l_sum: f64 = a.mean_levenshtein_dist_per_shape.iter().sum();
+        let b_l_sum: f64 = b.mean_levenshtein_dist_per_shape.iter().sum();
+        b_l_sum.partial_cmp(&a_l_sum).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {:?}", p.program_addr, p.mean_levenshtein_dist_per_shape);
+    });
+
+    log::info!("==== 5. addrs by mean sorensen");
+    input.sort_by(|a, b| {
+        let a_l_sum: f64 = a.mean_sorensen_dice_per_shape.iter().sum();
+        let b_l_sum: f64 = b.mean_sorensen_dice_per_shape.iter().sum();
+        b_l_sum.partial_cmp(&a_l_sum).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {:?}", p.program_addr, p.mean_sorensen_dice_per_shape);
+    });
+
+    log::info!("==== 6. addrs by instructions overlapping with referent and current");
+    input.sort_by(|a, b| {
+        let a: f64 = a.overlapping_parsed_ins_factor_referent + a.overlapping_parsed_ins_factor_current;
+        let b: f64 = b.overlapping_parsed_ins_factor_referent + b.overlapping_parsed_ins_factor_current;
+        b.partial_cmp(&a).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {:?}", p.program_addr, p.overlapping_parsed_ins_factor_referent + p.overlapping_parsed_ins_factor_current);
+    });
+
+    log::info!("==== 7. addrs by log words frequency score");
+    input.sort_by(|a, b| {
+        let a: f64 = a.words_frequency_score;
+        let b: f64 = b.words_frequency_score;
+        b.partial_cmp(&a).unwrap()
+    });
+    input.iter().take(n).for_each(|p| {
+        *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
+        log::info!("{} - {:?}", p.program_addr, p.words_frequency_score);
+    });
+
+    let mut pids = pids.into_iter().map(|(k,v)| (k, v)).collect_vec();
+    pids.sort_by(|a, b| b.1.cmp(&a.1));
+
+    log::info!("TOP candidates are:");
+    for (addr,v) in pids {
+        log::info!("{} - {:?}", addr, v);
     }
 
     Ok(())
@@ -125,7 +251,6 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
         programdata_address,
     } = bpf_loader_state
     {
-
         let programdata_acc = retry_n(STD_RETRY, || rpc.get_account(&programdata_address))?;
         program_size = programdata_acc.data.len();
 
@@ -141,7 +266,7 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
                 log::info!(" program last deployed at TS: {}", last_deployed_timestamp);
             }
         }
-            
+
         log::info!(
             "  Program data size extracted = {} from addr {}",
             program_size,
@@ -252,6 +377,46 @@ where
         Ok(r) => return Ok(r),
         Err(e) => return Err(anyhow::anyhow!("Error while executing - {:?}", e)),
     }
+}
+
+const LIST_SIGNATURES_PAGE_LIMIT: usize = 1000;
+
+fn get_latest_tx_sigs(
+    rpc: &RpcClient,
+    addr: &Pubkey,
+    tx_cnt: usize,
+) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+    let mut results = Vec::with_capacity(tx_cnt);
+    let mut count = 0;
+    let mut before: Option<Signature> = None;
+
+    while tx_cnt > count {
+        let cur_limit = if tx_cnt > LIST_SIGNATURES_PAGE_LIMIT + count {
+            LIST_SIGNATURES_PAGE_LIMIT
+        } else {
+            tx_cnt - count
+        };
+        let sigs = retry_n(STD_RETRY, || {
+            let cfg = solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+                limit: Some(cur_limit),
+                before,
+                ..Default::default()
+            };
+            rpc.get_signatures_for_address_with_config(&addr, cfg)
+        })?;
+
+        if let Some(last) = sigs.last() {
+            before = Some(last.signature.parse()?);
+            count += sigs.len();
+            results.extend(sigs);
+        } else {
+            // We didn't find required number of signatures, but there are no more for this Addr
+            // since we received an empty page while listing.
+            break;
+        }
+    }
+
+    Ok(results)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
