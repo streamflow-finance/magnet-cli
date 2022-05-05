@@ -751,10 +751,16 @@ fn cmp_two_programs(p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
         .intersection(&p2.set_of_parsed_ins)
         .map(|s| s.to_owned())
         .collect_vec();
-    let overlapping_parsed_ins_factor_referent =
-        overlapping_parsed_ins.len() as f64 / p1.set_of_parsed_ins.len() as f64;
-    let overlapping_parsed_ins_factor_current =
-        overlapping_parsed_ins.len() as f64 / p2.set_of_parsed_ins.len() as f64;
+    let overlapping_parsed_ins_factor_referent = if p1.set_of_parsed_ins.len() == 0 {
+        0.0 
+    } else {
+        overlapping_parsed_ins.len() as f64 / p1.set_of_parsed_ins.len() as f64
+    };
+    let overlapping_parsed_ins_factor_current = if p2.set_of_parsed_ins.len() == 0 {
+        0.0
+    } else {
+        overlapping_parsed_ins.len() as f64 / p2.set_of_parsed_ins.len() as f64
+    };
 
     let freq_p1 = log_words_frequency_map(&p1.tx_infos);
     let mut freq_p2 = log_words_frequency_map(&p2.tx_infos);
@@ -780,14 +786,20 @@ fn cmp_two_programs(p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
         })
         .sum::<f64>();
 
+    let program_owned_accounts_avg_size_factor = if p2.program_owned_accounts_avg_size() == 0 {
+        0.0
+    } else {
+        p1.program_owned_accounts_avg_size() as f64
+            / p2.program_owned_accounts_avg_size() as f64
+    };
+
     ProgramCMP {
         program_addr: p2.addr.clone(),
         program_instruction_size: p2.program_size,
         program_instruction_size_factor: p1.program_size as f64 / p2.program_size as f64,
         program_owned_accounts_cnt: p2.program_owned_accounts_cnt(),
         program_owned_accounts_avg_size: p2.program_owned_accounts_avg_size(),
-        program_owned_accounts_avg_size_factor: p1.program_owned_accounts_avg_size() as f64
-            / p2.program_owned_accounts_avg_size() as f64,
+        program_owned_accounts_avg_size_factor,
         program_owned_accounts_size_distribution: p2.size_occurencies.clone(),
         instruction_shapes: p2_tx_map.len(),
         shape_hits,
