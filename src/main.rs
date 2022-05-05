@@ -795,6 +795,7 @@ fn cmp_two_programs(p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
 
     ProgramCMP {
         program_addr: p2.addr.clone(),
+        program_last_deployed_ts: Some(p2.last_deployed_ts),
         program_instruction_size: p2.program_size,
         program_instruction_size_factor: p1.program_size as f64 / p2.program_size as f64,
         program_owned_accounts_cnt: p2.program_owned_accounts_cnt(),
@@ -861,6 +862,7 @@ fn parsed_inner_instruction_tag(ins: &ParsedInstruction) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProgramCMP {
     program_addr: String,
+    program_last_deployed_ts: Option<i64>,
     program_instruction_size: usize,
     program_instruction_size_factor: f64,
     program_owned_accounts_cnt: usize,
