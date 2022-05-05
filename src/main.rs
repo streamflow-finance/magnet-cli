@@ -244,12 +244,11 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
     }
 
     let mut last_deployed_timestamp = 0 as i64;
-    let mut program_size = 0;
+    let program_size;
     use solana_program::bpf_loader_upgradeable::UpgradeableLoaderState;
-    let bpf_loader_state: UpgradeableLoaderState = program_acc.deserialize_data()?;
-    if let UpgradeableLoaderState::Program {
+    if let Ok(UpgradeableLoaderState::Program {
         programdata_address,
-    } = bpf_loader_state
+    }) = program_acc.deserialize_data()
     {
         let programdata_acc = retry_n(STD_RETRY, || rpc.get_account(&programdata_address))?;
         program_size = programdata_acc.data.len();
@@ -272,6 +271,9 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
             program_size,
             programdata_address
         );
+    } else {
+        // this is not upgradable, so program data is embedded into normal program address
+        program_size = program_acc.data.len();
     }
 
     let mut size_occurencies = HashMap::new();
