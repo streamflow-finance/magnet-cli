@@ -820,9 +820,12 @@ const ALL_KEYWORD: &'static str = "__ALL_KEYWORD__";
 fn log_words_frequency_map(txs: &[TxInfo]) -> HashMap<String, usize> {
     let mut map = HashMap::new();
     for tx in txs {
-        let words = tx
-            .logs
-            .as_ref()
+        let logs = tx.logs.as_ref();
+        if logs.is_none() {
+            continue
+        }
+
+        let words = logs
             .unwrap()
             .iter()
             .filter(|l| l.starts_with("Program log"))
