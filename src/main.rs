@@ -32,7 +32,10 @@ struct Cli {
     #[clap(short, long, parse(from_occurrences))]
     debug: usize,
 
-    /// Solana RPC url
+    /// Solana RPC url to use. This is optional and will use mainnet by default.
+    /// Note that A LOT of requests will be issued to the RPC, so it is highly advisable
+    /// to use a dedicated, private RPC node, with higher rate limit then the public one
+    /// when using the analyze command. 
     #[clap(short, long)]
     rpc_url: Option<String>,
 
@@ -42,7 +45,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List program addresses
+    /// List program addresses from the chain and puts them into output file. 
+    /// This output is useful as an entry command for `analyze` command.
     ListPrograms {
         /// Sets an output file
         #[clap(short, long, parse(from_os_str))]
@@ -53,6 +57,10 @@ enum Commands {
         print_non_executable: bool,
     },
 
+    /// Analyzes the program addresses specified in the input file, and 
+    /// compares them to the program address given as a `referent_addr`
+    /// to see how similar they are. Generates an output file with 
+    /// information about the analyzed programs.
     Analyze {
         /// Sets an input file
         #[clap(short, long, parse(from_os_str))]
@@ -66,17 +74,24 @@ enum Commands {
         #[clap(short, long)]
         referent_addr: String,
 
-        /// Transactions per program to analyze
+        /// Transactions per program to analyze. The larger the value
+        /// more precise it will be, but it will last longer. Default is 50, 
+        /// but it is advisable to use order of magnitude larger, especially
+        /// for programs with diverse commands.
         #[clap(short, long, default_value_t = 50)]
         tx_cnt: usize,
     },
 
+    /// Uses the output of the `analyze` command as an input to generate
+    /// a TOP N report looking at the different tracked metrics. All metrics
+    /// are normalized and considered equal. 
     PickTop {
         
         /// Sets an input file to parse and analyze
         #[clap(short, long, parse(from_os_str))]
         input: PathBuf,
 
+        /// Picking top N for each category
         #[clap(short, long, default_value_t = 5)]
         n: usize,
     }
@@ -284,17 +299,11 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
         *size_occurencies.entry(byte_size).or_insert(0usize) += 1;
     }
 
-    let sigs = retry_n(STD_RETRY, || {
-        let cfg = solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
-            limit: Some(tx_cnt),
-            ..Default::default()
-        };
-        rpc.get_signatures_for_address_with_config(&key, cfg)
-    })?;
-
+    let sigs = get_latest_tx_sigs(rpc, &key, tx_cnt)?;
+    
     log::info!(
         "Extracting tx info for {} transactions for addr {}",
-        tx_cnt,
+        sigs.len(),
         addr
     );
 
@@ -417,6 +426,8 @@ fn get_latest_tx_sigs(
             break;
         }
     }
+
+    log::info!("Found {} tx signatures for addr {}", results.len(), addr);
 
     Ok(results)
 }
@@ -576,8 +587,9 @@ fn analyze(
     referent_addr: String,
     tx_cnt: usize,
 ) -> Result<()> {
+    // TODO make threads configurable?
     rayon::ThreadPoolBuilder::new()
-        .num_threads(std::cmp::min(16, tx_cnt / 5))
+        .num_threads(std::cmp::min(8, tx_cnt / 5))
         .build_global()
         .unwrap();
 
@@ -588,7 +600,7 @@ fn analyze(
         )
     })?;
 
-    let referent_info = analyze_one(&rpc, referent_addr, std::cmp::min(4 * tx_cnt, 1000))?;
+    let referent_info = analyze_one(&rpc, referent_addr, std::cmp::min(4 * tx_cnt, 5000))?;
 
     let referent_tx_infos_by_shape = referent_info.tx_infos_by_shape();
 
@@ -611,19 +623,6 @@ fn analyze(
         let acc_shape = tx_info.acc_shape();
         (*tx_info_m.entry(acc_shape).or_insert(vec![])).push(tx_info);
     }
-
-    let mut keys = tx_info_m.keys();
-    let one_key = keys.next().unwrap();
-    let other_key = keys.next().unwrap();
-
-    let txs1 = tx_info_m.get(one_key).unwrap();
-    let txs2 = tx_info_m.get(other_key).unwrap();
-
-    let cmp1 = cmp_tx_logs(&txs1[0], &txs1[1]);
-    log::info!("CMP1 = {:?}", cmp1);
-
-    let cmp2 = cmp_tx_logs(&txs1[0], &txs2[0]);
-    log::info!("CMP2 = {:?}", cmp2);
 
     for addr in std::fs::read_to_string(input)?.lines() {
         let mut err_cnt = 0;
@@ -676,7 +675,7 @@ fn analyze(
         }
 
         log::info!("Comparing referent with {}", other_info.addr);
-        let cmp = cmp_two_programs(&referent_info, &other_info);
+        let cmp = cmp_two_programs(tx_cnt, &referent_info, &other_info);
 
         log::info!("Compare finished - {:?}", cmp);
         writeln!(&mut out, "{}", serde_json::to_string(&cmp)?)?;
@@ -687,7 +686,7 @@ fn analyze(
     Ok(())
 }
 
-fn cmp_two_programs(p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
+fn cmp_two_programs(tx_cnt: usize, p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
     let p1_tx_map = p1.tx_infos_by_shape();
     let p2_tx_map = p2.tx_infos_by_shape();
 
@@ -698,17 +697,24 @@ fn cmp_two_programs(p1: &ProgramInfo, p2: &ProgramInfo) -> ProgramCMP {
     let mut mean_sorensen_dice_per_shape = vec![];
     let mut variance_sorensen_dice_per_shape = vec![];
 
+    // limiting the cartesian product to since I don't want it to go overboard
+    // 10k might even be too much
+    // TODO maybe make this configurable input param of the CLI
+    let mut limit = tx_cnt * tx_cnt;
+    if limit > 10_000 {
+        limit = 10_000;
+    }
+
     for p1_shape in p1_tx_map {
         if p2_tx_map.contains_key(&p1_shape.0) {
             shape_hits += 1;
             let tx1s = &p1_shape.1;
             let tx2s = &p2_tx_map[&p1_shape.0];
 
-            // limiting the cartisian product to 3k since I don't want it to go overboard
             let tx_pairs = tx1s
                 .iter()
                 .cartesian_product(tx2s.iter())
-                .take(3_000)
+                .take(limit)
                 .collect_vec();
 
             let cmp_res: Vec<(usize, f64, f64)> = tx_pairs
