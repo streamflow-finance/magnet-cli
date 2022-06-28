@@ -35,7 +35,7 @@ struct Cli {
     /// Solana RPC url to use. This is optional and will use mainnet by default.
     /// Note that A LOT of requests will be issued to the RPC, so it is highly advisable
     /// to use a dedicated, private RPC node, with higher rate limit then the public one
-    /// when using the analyze command. 
+    /// when using the analyze command.
     #[clap(short, long)]
     rpc_url: Option<String>,
 
@@ -45,7 +45,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List program addresses from the chain and puts them into output file. 
+    /// List program addresses from the chain and puts them into output file.
     /// This output is useful as an entry command for `analyze` command.
     ListPrograms {
         /// Sets an output file
@@ -57,9 +57,9 @@ enum Commands {
         print_non_executable: bool,
     },
 
-    /// Analyzes the program addresses specified in the input file, and 
+    /// Analyzes the program addresses specified in the input file, and
     /// compares them to the program address given as a `referent_addr`
-    /// to see how similar they are. Generates an output file with 
+    /// to see how similar they are. Generates an output file with
     /// information about the analyzed programs.
     Analyze {
         /// Sets an input file
@@ -75,7 +75,7 @@ enum Commands {
         referent_addr: String,
 
         /// Transactions per program to analyze. The larger the value
-        /// more precise it will be, but it will last longer. Default is 50, 
+        /// more precise it will be, but it will last longer. Default is 50,
         /// but it is advisable to use order of magnitude larger, especially
         /// for programs with diverse commands.
         #[clap(short, long, default_value_t = 50)]
@@ -84,9 +84,8 @@ enum Commands {
 
     /// Uses the output of the `analyze` command as an input to generate
     /// a TOP N report looking at the different tracked metrics. All metrics
-    /// are normalized and considered equal. 
+    /// are normalized and considered equal.
     PickTop {
-        
         /// Sets an input file to parse and analyze
         #[clap(short, long, parse(from_os_str))]
         input: PathBuf,
@@ -94,7 +93,7 @@ enum Commands {
         /// Picking top N for each category
         #[clap(short, long, default_value_t = 5)]
         n: usize,
-    }
+    },
 }
 
 fn main() -> Result<()> {
@@ -126,7 +125,7 @@ fn main() -> Result<()> {
             tx_cnt,
         }) => {
             analyze(rpc_client, input, output, referent_addr, tx_cnt)?;
-        },
+        }
         Some(Commands::PickTop { input, n }) => {
             pick_top(input, n)?;
         }
@@ -139,8 +138,10 @@ fn main() -> Result<()> {
 }
 
 fn pick_top(input: PathBuf, n: usize) -> Result<()> {
-
-    let input: Result<Vec<ProgramCMP>, _> = std::fs::read_to_string(input)?.lines().map(|l| serde_json::from_str(l)).collect();
+    let input: Result<Vec<ProgramCMP>, _> = std::fs::read_to_string(input)?
+        .lines()
+        .map(|l| serde_json::from_str(l))
+        .collect();
     let mut input = input?;
 
     let mut pids = HashMap::new();
@@ -180,7 +181,11 @@ fn pick_top(input: PathBuf, n: usize) -> Result<()> {
     });
     input.iter().take(n).for_each(|p| {
         *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
-        log::info!("{} - {}", p.program_addr, p.program_owned_accounts_avg_size_factor);
+        log::info!(
+            "{} - {}",
+            p.program_addr,
+            p.program_owned_accounts_avg_size_factor
+        );
     });
 
     log::info!("==== 3. addrs by shape hits");
@@ -202,7 +207,11 @@ fn pick_top(input: PathBuf, n: usize) -> Result<()> {
     });
     input.iter().take(n).for_each(|p| {
         *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
-        log::info!("{} - {:?}", p.program_addr, p.mean_levenshtein_dist_per_shape);
+        log::info!(
+            "{} - {:?}",
+            p.program_addr,
+            p.mean_levenshtein_dist_per_shape
+        );
     });
 
     log::info!("==== 5. addrs by mean sorensen");
@@ -218,13 +227,19 @@ fn pick_top(input: PathBuf, n: usize) -> Result<()> {
 
     log::info!("==== 6. addrs by instructions overlapping with referent and current");
     input.sort_by(|a, b| {
-        let a: f64 = a.overlapping_parsed_ins_factor_referent + a.overlapping_parsed_ins_factor_current;
-        let b: f64 = b.overlapping_parsed_ins_factor_referent + b.overlapping_parsed_ins_factor_current;
+        let a: f64 =
+            a.overlapping_parsed_ins_factor_referent + a.overlapping_parsed_ins_factor_current;
+        let b: f64 =
+            b.overlapping_parsed_ins_factor_referent + b.overlapping_parsed_ins_factor_current;
         b.partial_cmp(&a).unwrap()
     });
     input.iter().take(n).for_each(|p| {
         *pids.entry(p.program_addr.to_owned()).or_insert(0) += 1;
-        log::info!("{} - {:?}", p.program_addr, p.overlapping_parsed_ins_factor_referent + p.overlapping_parsed_ins_factor_current);
+        log::info!(
+            "{} - {:?}",
+            p.program_addr,
+            p.overlapping_parsed_ins_factor_referent + p.overlapping_parsed_ins_factor_current
+        );
     });
 
     log::info!("==== 7. addrs by log words frequency score");
@@ -238,11 +253,11 @@ fn pick_top(input: PathBuf, n: usize) -> Result<()> {
         log::info!("{} - {:?}", p.program_addr, p.words_frequency_score);
     });
 
-    let mut pids = pids.into_iter().map(|(k,v)| (k, v)).collect_vec();
+    let mut pids = pids.into_iter().map(|(k, v)| (k, v)).collect_vec();
     pids.sort_by(|a, b| b.1.cmp(&a.1));
 
     log::info!("TOP candidates are:");
-    for (addr,v) in pids {
+    for (addr, v) in pids {
         log::info!("{} - {:?}", addr, v);
     }
 
@@ -300,7 +315,7 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
     }
 
     let sigs = get_latest_tx_sigs(rpc, &key, tx_cnt)?;
-    
+
     log::info!(
         "Extracting tx info for {} transactions for addr {}",
         sigs.len(),
@@ -758,7 +773,7 @@ fn cmp_two_programs(tx_cnt: usize, p1: &ProgramInfo, p2: &ProgramInfo) -> Progra
         .map(|s| s.to_owned())
         .collect_vec();
     let overlapping_parsed_ins_factor_referent = if p1.set_of_parsed_ins.len() == 0 {
-        0.0 
+        0.0
     } else {
         overlapping_parsed_ins.len() as f64 / p1.set_of_parsed_ins.len() as f64
     };
@@ -795,8 +810,7 @@ fn cmp_two_programs(tx_cnt: usize, p1: &ProgramInfo, p2: &ProgramInfo) -> Progra
     let program_owned_accounts_avg_size_factor = if p2.program_owned_accounts_avg_size() == 0 {
         0.0
     } else {
-        p1.program_owned_accounts_avg_size() as f64
-            / p2.program_owned_accounts_avg_size() as f64
+        p1.program_owned_accounts_avg_size() as f64 / p2.program_owned_accounts_avg_size() as f64
     };
 
     ProgramCMP {
@@ -828,7 +842,7 @@ fn log_words_frequency_map(txs: &[TxInfo]) -> HashMap<String, usize> {
     for tx in txs {
         let logs = tx.logs.as_ref();
         if logs.is_none() {
-            continue
+            continue;
         }
 
         let words = logs
