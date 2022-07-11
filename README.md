@@ -19,13 +19,14 @@ OPTIONS:
     -V, --version              Print version information
 
 SUBCOMMANDS:
+    list-programs    List program addresses from the chain and puts them into output file. This
+                         output is useful as an entry command for `analyze` command
     analyze          Analyzes the program addresses specified in the input file, and compares
                          them to the program address given as a `referent_addr` to see how similar
                          they are. Generates an output file with information about the analyzed
                          programs
     help             Print this message or the help of the given subcommand(s)
-    list-programs    List program addresses from the chain and puts them into output file. This
-                         output is useful as an entry command for `analyze` command
+    
     pick-top         Uses the output of the `analyze` command as an input to generate a TOP N
                          report looking at the different tracked metrics. All metrics are normalized
                          and considered equal
@@ -130,7 +131,7 @@ Here is one example how CLI can be used
 head -n10 out/test > out/test-first-10
 
 // execute the analyze command
-./magnet-cli --rpc_url <PRIVATE_RPC_URL> analyze --input out/test-first-10 \
+./magnet-cli --rpc-url <PRIVATE_RPC_URL> analyze --input out/test-first-10 \
                                                  --output out/analyze-output-test-first-10 \
                                                  --referent-addr strmRqUCoQUgGUan5YhzUZa6KqdzwX5L6FpUxfmKg5m \
                                                  --tx-cnt 100

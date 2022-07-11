@@ -665,7 +665,7 @@ fn analyze(
 
         if other_info.is_err() {
             log::error!(
-                "Dropping account address `{}` due to error: {:?}",
+                "Dropping program address `{}` due to error: {:?}",
                 addr,
                 other_info
             );
