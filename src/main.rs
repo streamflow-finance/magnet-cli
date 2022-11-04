@@ -13,7 +13,9 @@ use retry::{delay::Fixed, OperationResult};
 use serde::{Deserialize, Serialize};
 use solana_client::{
     rpc_client::RpcClient, rpc_response::RpcConfirmedTransactionStatusWithSignature,
+    rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig}
 };
+use solana_account_decoder::{UiDataSliceConfig, UiAccountEncoding};
 use solana_program::pubkey::Pubkey;
 
 use anyhow::{Context, Result};
@@ -494,9 +496,8 @@ fn extract_info_from_tx(
     let tx_meta = tx_meta.unwrap();
     if let solana_transaction_status::EncodedTransaction::Json(ui_ix) = tx.transaction.transaction {
         if let solana_transaction_status::UiMessage::Parsed(msg) = ui_ix.message {
-            let inner_inst = tx_meta.inner_instructions;
+            let inner_inst: Option<Vec<UiInnerInstructions>> = Option::from(tx_meta.inner_instructions);
             let mut inner_parsed_instructions = vec![];
-
             if let Some(inner_insts) = &inner_inst {
                 for inst in inner_insts {
                     for iii in &inst.instructions {
@@ -513,7 +514,7 @@ fn extract_info_from_tx(
 
             return Some(TxInfo {
                 signature: signature.to_owned(),
-                logs: tx_meta.log_messages,
+                logs: Option::from(tx_meta.log_messages),
                 acc_keys: msg.account_keys,
                 inner_intructions: inner_inst,
                 inner_parsed_instructions,
@@ -587,8 +588,21 @@ fn list_programs(rpc: RpcClient, output: PathBuf, print_non_executable: bool) ->
 }
 
 fn fetch_program_accounts(rpc: &RpcClient, key: &Pubkey) -> Result<Vec<(Pubkey, Account)>> {
+    let config = RpcProgramAccountsConfig {
+        filters: None,
+        account_config: RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            data_slice: Some(UiDataSliceConfig {
+                offset: 0,
+                length: 0,
+            }),
+            commitment: None,
+            min_context_slot: None,
+        },
+        with_context: Some(false),
+    };
     let res = rpc
-        .get_program_accounts(&key)
+        .get_program_accounts_with_config(&key, config)
         .with_context(|| format!("Error while fetching program accounts owhned by {}", key))?;
 
     log::info!("There are {} programs listed owned by `{}`", res.len(), key);
