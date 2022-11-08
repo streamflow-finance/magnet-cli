@@ -24,7 +24,8 @@ RUN cargo build --release
 # our final base
 FROM debian:buster-slim
 
-RUN apt-get update && apt-get install libudev-dev
+RUN apt-get update && apt-get install libudev-dev && apt-get install -y wget
+RUN apt-get install libssl1.1
 
 # copy the build artifact from the build stage
 COPY --from=build /magnet-cli/target/release/magnet-cli .
