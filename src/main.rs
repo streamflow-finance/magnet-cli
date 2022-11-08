@@ -9,14 +9,19 @@ use std::{
 use clap::{Parser, Subcommand};
 use itertools::Itertools;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use reqwest::blocking::Client;
 use retry::{delay::Fixed, OperationResult};
-use serde::{Deserialize, Serialize};
-use solana_client::{
-    rpc_client::RpcClient, rpc_response::RpcConfirmedTransactionStatusWithSignature,
-    rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig}
+use serde::{
+    de::{SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
 };
-use solana_account_decoder::{UiDataSliceConfig, UiAccountEncoding};
-use solana_program::pubkey::Pubkey;
+use solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig};
+use solana_client::{
+    rpc_client::RpcClient,
+    rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
+    rpc_response::RpcConfirmedTransactionStatusWithSignature,
+};
+use solana_program::{blake3::Hash, pubkey::Pubkey};
 
 use anyhow::{Context, Result};
 use solana_sdk::{account::Account, signature::Signature};
@@ -266,7 +271,12 @@ fn pick_top(input: PathBuf, n: usize) -> Result<()> {
     Ok(())
 }
 
-fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramInfo> {
+fn analyze_one(
+    rpc: &RpcClient,
+    http_client: &Client,
+    addr: String,
+    tx_cnt: usize,
+) -> Result<ProgramInfo> {
     log::info!("Fetching info for program on addr={}", addr);
     let key = Pubkey::from_str(&addr)?;
     let program_acc = retry_n(STD_RETRY, || rpc.get_account(&key))?;
@@ -308,13 +318,14 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
         program_size = program_acc.data.len();
     }
 
-    let mut size_occurencies = HashMap::new();
+    let size_occurencies = retry_n(STD_RETRY, || {
+        extract_size_distributions(&http_client, &rpc.url(), &addr)
+    })?;
 
-    let program_accs = retry_n(STD_RETRY, || rpc.get_program_accounts(&key))?;
-    for (_, acc) in program_accs {
-        let byte_size = acc.data.len();
-        *size_occurencies.entry(byte_size).or_insert(0usize) += 1;
-    }
+    log::info!(
+        "Extracted size distributions for {} owned accounts",
+        size_occurencies.iter().map(|(k, v)| *v).sum::<usize>()
+    );
 
     let sigs = get_latest_tx_sigs(rpc, &key, tx_cnt)?;
 
@@ -370,6 +381,118 @@ fn analyze_one(rpc: &RpcClient, addr: String, tx_cnt: usize) -> Result<ProgramIn
         tx_infos,
         set_of_parsed_ins,
     })
+}
+
+/// Instead of using solana RPC client to perform `get_program_accounts` call, here it is
+/// implemented manually, since this endpoint doesn't have pagination implemented, and allocates
+/// a huge amounts of memory when interacting with programs that own a lot of accounts.
+///
+/// This implementation reduces json response from the data stream into map of size distributions,
+/// instead of buffering the vector of response objects in the memory, and calculating distribution
+/// afterwards.
+///
+/// If needed in the future, this method can be generalized to accept a visitor that can perform
+/// some other reduction operation if needed.
+fn extract_size_distributions(
+    http_client: &Client,
+    rpc_url: &str,
+    program_addr: &str,
+) -> std::result::Result<HashMap<usize, usize>, solana_client::client_error::ClientError> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method":"getProgramAccounts",
+        "params": [ program_addr, { "encoding": "base64" } ]
+    });
+
+    let resp = http_client
+        .post(rpc_url)
+        .header("content-type", "application/json")
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .map_err(|e| {
+            let e_kind = solana_client::client_error::ClientErrorKind::Custom(format!(
+                "Error while communicating with solana RPC endpoint - {:?}",
+                e
+            ));
+            solana_client::client_error::ClientError {
+                request: None,
+                kind: e_kind,
+            }
+        })?;
+
+    use std::io::BufReader;
+    // buffering here is important for performance reasons, hyper doesn't buffer response by default.
+    let buff = BufReader::with_capacity(8 * 1024, resp);
+    let res: RpcGetProgramAccsResp = serde_json::from_reader(buff).map_err(|e| {
+        let e_kind = solana_client::client_error::ClientErrorKind::Custom(format!(
+            "Error while deserializing resp from `getProgramAccounts` - {:?}",
+            e
+        ));
+        solana_client::client_error::ClientError {
+            request: None,
+            kind: e_kind,
+        }
+    })?;
+
+    Ok(res.size_distributions)
+}
+
+#[derive(Deserialize, Debug)]
+struct RpcGetProgramAccsResp {
+    jsonrpc: String,
+
+    #[serde(deserialize_with = "size_distributions")]
+    #[serde(rename(deserialize = "result"))]
+    size_distributions: HashMap<usize, usize>,
+}
+
+fn size_distributions<'de, D>(deserializer: D) -> Result<HashMap<usize, usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DistributionsVisitor();
+
+    impl<'de> Visitor<'de> for DistributionsVisitor {
+        type Value = HashMap<usize, usize>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("Unexpected json input data format")
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<HashMap<usize, usize>, S::Error>
+        where
+            S: SeqAccess<'de>,
+        {
+            let mut size_distributions: HashMap<usize, usize> = HashMap::new();
+
+            while let Some(value) = seq.next_element::<AccInfo>()? {
+                let data_size = value.account.data[0].len();
+                *size_distributions.entry(data_size).or_insert(0) += 1;
+            }
+
+            Ok(size_distributions)
+        }
+    }
+
+    let visitor = DistributionsVisitor();
+    deserializer.deserialize_seq(visitor)
+}
+
+#[derive(Deserialize)]
+struct AccInfo {
+    account: AccData,
+    pubkey: String,
+}
+
+#[derive(Deserialize)]
+struct AccData {
+    data: [String; 2],
+    executable: bool,
+    lamports: u64,
+    owner: String,
+    #[serde(rename(deserialize = "rentEpoch"))]
+    rent_epoch: u64,
 }
 
 fn retry_n<F, T>(max: u64, mut func: F) -> Result<T>
@@ -496,7 +619,8 @@ fn extract_info_from_tx(
     let tx_meta = tx_meta.unwrap();
     if let solana_transaction_status::EncodedTransaction::Json(ui_ix) = tx.transaction.transaction {
         if let solana_transaction_status::UiMessage::Parsed(msg) = ui_ix.message {
-            let inner_inst: Option<Vec<UiInnerInstructions>> = Option::from(tx_meta.inner_instructions);
+            let inner_inst: Option<Vec<UiInnerInstructions>> =
+                Option::from(tx_meta.inner_instructions);
             let mut inner_parsed_instructions = vec![];
             if let Some(inner_insts) = &inner_inst {
                 for inst in inner_insts {
@@ -622,6 +746,8 @@ fn analyze(
         .build_global()
         .unwrap();
 
+    let http_client = reqwest::blocking::Client::new();
+
     let mut out = std::fs::File::create(&output).with_context(|| {
         format!(
             "Unable to create output file on path `{}`",
@@ -629,7 +755,12 @@ fn analyze(
         )
     })?;
 
-    let referent_info = analyze_one(&rpc, referent_addr, std::cmp::min(4 * tx_cnt, 5000))?;
+    let referent_info = analyze_one(
+        &rpc,
+        &http_client,
+        referent_addr,
+        std::cmp::min(4 * tx_cnt, 5000),
+    )?;
 
     let referent_tx_infos_by_shape = referent_info.tx_infos_by_shape();
 
@@ -656,7 +787,7 @@ fn analyze(
     for addr in std::fs::read_to_string(input)?.lines() {
         let mut err_cnt = 0;
         let other_info = loop {
-            let info = analyze_one(&rpc, addr.to_owned(), tx_cnt);
+            let info = analyze_one(&rpc, &http_client, addr.to_owned(), tx_cnt);
 
             if info.is_err() {
                 err_cnt += 1;
