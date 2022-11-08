@@ -30,6 +30,13 @@ use solana_transaction_status::{
     EncodedConfirmedTransactionWithStatusMeta, UiInnerInstructions,
 };
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 const STD_RETRY: u64 = 50;
 
 #[derive(Parser)]
